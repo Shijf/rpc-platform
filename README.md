@@ -1,5 +1,8 @@
 # RPC 服务发现演示
 
+> 新服务开发、接口设计、Dokploy 部署与排障请先阅读：
+> [RPC 系统开发与部署规范](docs/RPC_SYSTEM_GUIDE.md)
+
 这个项目通过 Dokploy 或 Docker Compose 部署两个服务：
 
 - `user-service:50051`：提供 `UserService.GetUser`。
