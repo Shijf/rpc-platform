@@ -365,14 +365,19 @@ user.v2
 
 ### 7.4 跨仓库契约
 
-当前教学示例在两个仓库各保存了一份相同的 `rpcdemo.proto`，这样容易理解和独立构建，但长期存在接口漂移风险。
+当前系统已经建立独立的 `rpc-contracts` 仓库，两个业务仓库不再各自保存 `.proto`。它的结构如下：
 
-服务增多后应选择一种正式方案：
+```text
+rpc-contracts/
+├── proto/                 唯一协议源文件
+├── sdk/python/            Python 生成代码和包配置
+├── sdk/node/              Node.js/TypeScript 生成代码和包配置
+├── sdk/go/                Go 生成代码和 go.mod
+├── scripts/generate.sh    lint 并生成三种 SDK
+└── scripts/vendor-python.sh
+```
 
-1. 建立独立 `rpc-contracts` Git 仓库。
-2. 在 CI 中固定 contracts 的 Git tag 或 commit。
-3. 或使用 Buf Schema Registry 管理接口。
-4. 使用 `buf lint` 和 `buf breaking` 检查格式及不兼容变更。
+`buf lint` 负责风格检查，固定版本的 Buf 远程插件负责生成代码。当前 Python 业务服务使用 vendor 方式携带固定版本 SDK，避免 Dokploy 构建镜像时访问 GitHub 或注入私钥。以后也可以把 SDK 发布到 PyPI、npm、Go module proxy 或 Buf Schema Registry。
 
 原则：提供服务的一方拥有接口定义，调用方消费确定版本的接口，不应该自行修改对方的 Proto。
 
@@ -384,19 +389,16 @@ user.v2
 
 ```text
 grpcio
-grpcio-tools
 grpcio-health-checking
 grpcio-reflection
+protobuf
 ```
 
-生成 Python 代码：
+生成代码不在业务仓库进行，而是在 `rpc-contracts` 一次生成三种语言 SDK：
 
 ```bash
-python -m grpc_tools.protoc \
-  -Iproto \
-  --python_out=. \
-  --grpc_python_out=. \
-  proto/inventory.proto
+cd /home/shijf/rpc-contracts
+./scripts/generate.sh
 ```
 
 服务端示例：
@@ -405,8 +407,7 @@ python -m grpc_tools.protoc \
 from concurrent import futures
 
 import grpc
-import inventory_pb2
-import inventory_pb2_grpc
+from inventory.v1 import inventory_pb2, inventory_pb2_grpc
 
 
 class InventoryService(inventory_pb2_grpc.InventoryServiceServicer):
@@ -499,12 +500,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY proto /proto
-RUN python -m grpc_tools.protoc \
-    -I/proto \
-    --python_out=/app \
-    --grpc_python_out=/app \
-    /proto/example.proto
+COPY vendor/rpcdemo /app/rpcdemo
 
 COPY app.py .
 
@@ -1005,7 +1001,7 @@ user-service:50051
 
 建议按以下顺序阅读：
 
-1. 阅读 `proto/rpcdemo.proto`，理解接口契约。
+1. 阅读 `rpc-contracts/proto/rpcdemo/v1/rpcdemo.proto`，理解唯一接口契约。
 2. 阅读 User Service 的 `GetUser()` 服务端实现。
 3. 阅读 Order Service 如何创建 `UserServiceStub`。
 4. 阅读 Order Service 的 `ListOrders()` 服务端实现。
@@ -1039,12 +1035,86 @@ Dokploy 自动部署
 
 按优先级逐步建设：
 
-1. 建立独立 `rpc-contracts` 仓库，消除 Proto 复制。
-2. 使用 Buf 做 lint 和 breaking-change 检查。
-3. 为 Python/TypeScript/Go 自动生成客户端 SDK。
-4. 统一请求 ID、错误模型、日志格式和鉴权 metadata。
-5. 接入 OpenTelemetry 链路追踪。
-6. 引入异步消息队列处理长任务和事件通知。
-7. 多节点或跨机房后，再评估 Consul、Envoy 或服务网格。
+已完成：
+
+- 建立独立 `rpc-contracts` 仓库，消除 Proto 复制。
+- 使用 Buf lint，并固定生成器版本。
+- 自动生成并编译验证 Python、TypeScript、Go SDK。
+- 两个现有 Python 服务改用固定版本的中央 SDK。
+
+下一阶段按优先级逐步建设：
+
+1. 在协议仓库的 CI 中加入相对 `main` 的 `buf breaking` 检查。
+2. 统一请求 ID、错误模型、日志格式和鉴权 metadata。
+3. 接入 OpenTelemetry 链路追踪。
+4. 引入异步消息队列处理长任务和事件通知。
+5. 多节点或跨机房后，再评估 Consul、Envoy 或服务网格。
 
 当前阶段不需要为了“看起来完整”而过早安装复杂注册中心。先保持 Docker DNS、统一网络、稳定服务名和良好接口规范，已经能够支撑这台服务器上的内部微服务开发。
+
+---
+
+## 24. 中央 Contracts 与三语言 SDK 的日常流程
+
+### 24.1 谁负责什么
+
+```text
+rpc-contracts     定义“有哪些接口、字段和类型”，生成三种语言代码
+Docker DNS        把 user-service 等稳定名称解析为运行中的容器地址
+gRPC              规定二进制消息和远程调用过程
+业务仓库          实现接口，或通过生成客户端调用其他服务
+Dokploy           根据各业务仓库独立构建、部署和回滚
+```
+
+SDK 不是单独运行的服务，也不负责服务发现。它是一组生成代码：包含消息类型、序列化逻辑、服务端基类和客户端 Stub。
+
+### 24.2 修改接口
+
+```bash
+cd /home/shijf/rpc-contracts
+
+# 1. 只修改 proto 下的源文件
+vim proto/rpcdemo/v1/rpcdemo.proto
+
+# 2. 统一校验并重新生成 Python、Node、Go
+./scripts/generate.sh
+
+# 3. 检查差异
+git diff
+
+# 4. 提交并打版本标签
+git add .
+git commit -m "feat: add payment rpc"
+git tag v0.2.0
+git push origin main --tags
+```
+
+已经发布的字段编号不能改动或复用。不兼容变更新建 `v2` 包，不直接破坏 `v1`。
+
+### 24.3 升级现有 Python 服务
+
+```bash
+cd /home/shijf/rpc-contracts
+./scripts/vendor-python.sh /home/shijf/rpc-user-service
+
+cd /home/shijf/rpc-user-service
+git diff
+docker build -t rpc-user-service:contract-test .
+git add .
+git commit -m "chore: upgrade rpc contracts to 0.2.0"
+git push origin main
+```
+
+`vendor/RPC_CONTRACTS_VERSION`、镜像环境变量和 OCI Label 会记录服务使用的契约版本，`/healthz` 也会返回它。
+
+### 24.4 新建 Python、Node.js、Go 服务
+
+- Python 导入：`from rpcdemo.v1 import rpcdemo_pb2, rpcdemo_pb2_grpc`
+- Node.js 导入：`import { UserServiceClient } from "@shijf/rpc-contracts"`
+- Go 导入：`github.com/Shijf/rpc-contracts/sdk/go/rpcdemo/v1`
+
+无论使用哪种语言，容器都加入外部 `rpc-network`，调用地址继续写稳定名称，例如 `user-service:50051`。不要写容器 IP，也不要把 `50051` 发布到宿主机。
+
+### 24.5 发布顺序
+
+兼容变更的安全顺序是：先发布新版 contracts，再升级服务端，再逐个升级调用方。因为新增字段在 Proto3 中可以被旧客户端忽略，所以不需要让所有仓库同一秒部署。删除或改变已有字段属于破坏性变更，应使用新包版本并保留一段双版本迁移期。
