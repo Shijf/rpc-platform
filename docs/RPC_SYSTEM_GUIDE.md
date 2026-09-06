@@ -1118,3 +1118,94 @@ git push origin main
 ### 24.5 发布顺序
 
 兼容变更的安全顺序是：先发布新版 contracts，再升级服务端，再逐个升级调用方。因为新增字段在 Proto3 中可以被旧客户端忽略，所以不需要让所有仓库同一秒部署。删除或改变已有字段属于破坏性变更，应使用新包版本并保留一段双版本迁移期。
+
+---
+
+## 25. 2026-09-06 实际落地与验收记录
+
+本节记录已经在服务器上完成并验证的真实状态，不是待办方案。
+
+### 25.1 仓库与版本
+
+| 仓库 | 作用 | 本次落地提交 |
+| --- | --- | --- |
+| `Shijf/rpc-contracts` | 唯一 Proto 来源，生成 Python、Node.js、Go SDK | `a426ab8`，标签 `v0.1.0` |
+| `Shijf/rpc-user-service` | 用户服务，同时演示调用订单服务 | `d4afacf` |
+| `Shijf/rpc-order-service` | 订单服务，同时演示调用用户服务 | `fbdaf34` |
+| `Shijf/rpc-platform` | 架构、部署和运维文档 | `f804161` |
+
+服务器工作目录：
+
+```text
+/home/shijf/rpc-contracts
+/home/shijf/rpc-user-service
+/home/shijf/rpc-order-service
+/home/shijf/rpc-platform
+```
+
+所有仓库使用服务器上的 GitHub 公共 SSH 身份配置，私钥不进入代码仓库、Docker 镜像或 Compose 文件。
+
+### 25.2 已完成的改造
+
+- `.proto` 只存在于 `rpc-contracts/proto/rpcdemo/v1/rpcdemo.proto`。
+- Buf 同时生成 Python、Node.js/TypeScript、Go SDK，并固定生成器版本。
+- Python SDK 可以构建为标准 Python 包。
+- Node.js SDK 使用 `@grpc/grpc-js`，TypeScript 编译通过。
+- Go SDK 是独立 Go module，`go test ./...` 通过。
+- 两个 Python 服务删除了重复 Proto 和构建期 `grpcio-tools`。
+- 两个服务携带经过验证的固定版本 SDK，Dokploy 构建不需要读取 GitHub 私钥。
+- 镜像 Label、环境变量、`vendor/RPC_CONTRACTS_VERSION` 和 `/healthz` 都记录契约版本 `0.1.0`。
+- `GetUser` 返回消息已按 Buf 标准命名为 `GetUserResponse`，字段编号和 RPC 方法路径保持兼容。
+
+### 25.3 跨语言验收
+
+在隔离 Docker 网络中完成过以下真实调用：
+
+```text
+Python user-service  ──gRPC──> Python order-service
+Python order-service ──gRPC──> Python user-service
+Node.js client       ──gRPC──> Python user-service
+Go client            ──gRPC──> Python user-service
+```
+
+随后 Dokploy 自动重建了正式容器，正式环境验收结果：
+
+- User Service 状态为 `healthy`。
+- Order Service 状态为 `healthy`。
+- User → Order 调用约 `4.26 ms`。
+- Order → User 调用约 `4.20 ms`。
+- 两个 `/healthz` 都返回 `rpc_contracts: 0.1.0`。
+- 服务仍只通过 `rpc-network` 暴露内部 `50051`，没有新增宿主机端口。
+- `rpc-contracts`、User Service、Order Service、RPC Platform 四个 GitHub Actions 均执行成功。
+- 测试使用的临时容器、网络、镜像和依赖缓存已经清理。
+
+### 25.4 随时复查正式环境
+
+```bash
+docker ps \
+  --filter name=rpctest-userservice \
+  --filter name=rpctest-orderservice
+
+docker exec rpctest-userservice-4dyz9j-user-service-1 \
+  python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8080/healthz").read().decode())'
+
+docker exec rpctest-orderservice-hsayiz-order-service-1 \
+  python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8080/healthz").read().decode())'
+```
+
+容器名称中的随机部分可能在 Dokploy 重新部署后改变。脚本或正式配置不要依赖完整容器名称；业务调用始终使用 `user-service:50051`、`order-service:50051` 等网络别名。
+
+### 25.5 从演示进入真实项目
+
+真实项目继续沿用同一套基础设施，但每个服务必须有明确的业务边界：
+
+1. 先写业务需求和数据归属，不先按技术层随意拆服务。
+2. 在 `rpc-contracts` 增加带版本的业务包，例如 `catalog.v1`、`payment.v1`。
+3. 执行 `./scripts/generate.sh`，让三种语言 SDK 同时更新。
+4. 服务仓库只实现自己拥有的接口和数据库，不直接读取其他服务的数据库。
+5. Compose 加入外部 `rpc-network`，设置唯一稳定的网络别名。
+6. 本地完成单元测试、镜像构建、健康检查和 RPC 集成测试。
+7. 推送 GitHub，由现有 CI 和 Dokploy 完成构建部署。
+8. 从服务器浏览器和服务中心验收，不为纯内部 RPC 服务开放公网域名。
+
+这套结构已经具备真实项目开发条件；后续新增服务不需要重新安装“服务发现中心”，只需要复用 `rpc-network`、中央 contracts、SDK 和 Dokploy 部署规范。
