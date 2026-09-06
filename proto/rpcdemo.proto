@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package rpcdemo.v1;
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+}
+
+service OrderService {
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message User {
+  string user_id = 1;
+  string nickname = 2;
+  string source_service = 3;
+}
+
+message ListOrdersRequest {
+  string user_id = 1;
+}
+
+message Order {
+  string order_id = 1;
+  string product_name = 2;
+  int64 amount_cents = 3;
+}
+
+message ListOrdersResponse {
+  string user_id = 1;
+  repeated Order orders = 2;
+  string source_service = 3;
+}

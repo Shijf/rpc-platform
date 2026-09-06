@@ -1,0 +1,53 @@
+services:
+  user-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ROLE: user
+      GRPC_PORT: "50051"
+      HTTP_PORT: "8080"
+      ORDER_SERVICE_ADDR: order-service:50051
+    expose:
+      - "50051"
+      - "8080"
+    networks:
+      rpc-network:
+        aliases:
+          - user-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ROLE: order
+      GRPC_PORT: "50051"
+      HTTP_PORT: "8080"
+      USER_SERVICE_ADDR: user-service:50051
+    expose:
+      - "50051"
+      - "8080"
+    networks:
+      rpc-network:
+        aliases:
+          - order-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  rpc-network:
+    external: true
+    name: rpc-network
